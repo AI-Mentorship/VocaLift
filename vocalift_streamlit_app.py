@@ -279,7 +279,7 @@ with st.sidebar:
         st.error(f"❌ Model file not found")
         model_loaded = False
     if st.session_state.full_song_result is not None or st.session_state.segment_results is not None or st.session_state.pitch_contour_fig is not None:
-        st.header("Go to Results:")
+        st.header("Results:")
 
     if st.session_state.full_song_result is not None:
         st.sidebar.markdown("""
