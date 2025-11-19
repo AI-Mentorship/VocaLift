@@ -119,6 +119,3 @@
 ***
 
 **VocaLift — Your AI Vocal Coach, Anytime, Anywhere.**
-
-[1](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/127719437/085084ed-4f2c-4049-bebd-ca75e28515a5/vocalift_utils.py)
-[2](https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/attachments/127719437/50814e01-6fa6-412d-96eb-435d167c0f08/vocalift_streamlit_app.py)
