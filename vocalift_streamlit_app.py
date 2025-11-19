@@ -1,7 +1,3 @@
-"""
-VocaLift Streamlit App
-Upload audio, run AI-powered vocal analysis, and visualize results.
-"""
 
 import streamlit as st
 import os
@@ -13,67 +9,78 @@ from tensorflow.keras.models import load_model
 
 # Import all utility functions from vocalift_utils
 from vocalift_utils import (
-    SR, generate_feedback, analyze_segments, save_uploaded_files,
-    make_pitch_contour_figure, compute_soft_label
+    SR,
+    generate_feedback,
+    analyze_segments,
+    save_uploaded_files,
+    make_pitch_contour_figure,
+    compute_soft_label,
+    get_gemini_feedback
 )
 
 # Model paths
 MODEL_PATH = "model/vocalift_model (3).h5"
 
-
 # ========================================
 # INITIALIZE SESSION STATE
 # ========================================
+
 if "is_processing" not in st.session_state:
     st.session_state.is_processing = False
+
 if "pitch_contour_fig" not in st.session_state:
     st.session_state.pitch_contour_fig = None
+
 if "full_song_result" not in st.session_state:
     st.session_state.full_song_result = None
+
 if "segment_results" not in st.session_state:
     st.session_state.segment_results = None
+
 if "analysis_audio_files" not in st.session_state:
     st.session_state.analysis_audio_files = {}
+
 if "analysis_to_run" not in st.session_state:
     st.session_state.analysis_to_run = None
+
+if "gemini_feedback" not in st.session_state:  # NEW
+    st.session_state.gemini_feedback = None
 
 # ========================================
 # DISPLAY FUNCTIONS
 # ========================================
+
 def show_full_song_analysis(result):
     """Display full song analysis results."""
-    st.markdown('<h2 class="full-song">📊 Full Song Analysis Results</h2>', unsafe_allow_html=True)
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Model Confidence", f"{result['prob_good'] * 100:.1f}%")
-    with col2:
-        if result['prediction'] >= 0.8:
-            assessment_color = "🟢"
-        elif result['prediction'] >= 0.6:
-            assessment_color = "🟡"
-        else:
-            assessment_color = "🔴"
-        st.metric("Assessment", f"{assessment_color} {result['overall_assessment']}")
-    with col3:
-        st.metric("Similarity Score", f"{compute_soft_label(result['comp_feats']) * 100:.1f}/100")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
     
-    st.markdown("---")
-    st.subheader("📝 Feedback")
-    for i, line in enumerate(result['feedback_lines'], 1):
-        st.markdown(f"{i}. {line}")
+    prob_good = result.get('prob_good', 0) * 100
+    overall = result.get('overall_assessment', 'Unknown')
     
-    st.markdown("---")
-    st.subheader("📈 Metrics")
+    st.subheader("📈 Overall Analysis")
+    
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Similarity**")
-        st.metric("MFCC", f"{result['comp_feats']['mfcc_cosine'] * 100:.1f}%")
-        st.metric("Pitch", f"{result['comp_feats']['pitch_corr']:.2f}")
-        st.metric("Energy", f"{result['comp_feats']['energy_corr']:.2f}")
+        st.metric("Model Confidence", f"{prob_good:.1f}%")
     with col2:
-        st.markdown("**Timing & Tempo**")
-        st.metric("DTW Distance", f"{result['comp_feats']['dtw_mean']:.1f}")
-        st.metric("Tempo Diff", f"{result['comp_feats']['tempo_diff']:.1f} BPM")
+        st.metric("Overall Assessment", overall)
+    
+    st.markdown("---")
+    st.subheader("📊 Comparison Metrics")
+    
+    comp = result.get('comp_feats', {})
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("MFCC Similarity", f"{comp.get('mfcc_cosine', 0):.2%}")
+        st.metric("Pitch Correlation", f"{comp.get('pitch_corr', 0):.2f}")
+    with col2:
+        st.metric("DTW Distance", f"{comp.get('dtw_mean', 0):.1f}")
+        st.metric("Energy Correlation", f"{comp.get('energy_corr', 0):.2f}")
+    with col3:
+        st.metric("Chroma Similarity", f"{comp.get('chroma_cosine', 0):.2%}")
+        st.metric("Tempo Diff", f"{comp.get('tempo_diff', 0):.1f} BPM")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
 def show_segment_analysis(segment_results):
     """Display segment-by-segment analysis with Plotly charts and details."""
@@ -88,7 +95,8 @@ def show_segment_analysis(segment_results):
     exc_line_color = "#39FF14"
     fair_line_color = "#C4C400"
     poor_line_color = "#FF0059"
-    heatmap_colorscale = [[0.0, "#0E0E10"], [0.25, "#FF2AEF"], [0.5, "#39FF14"], [0.75, "#FFD700"], [1.0, "#FFFFFF"]]
+    heatmap_colorscale = [[0.0, "#0E0E10"], [0.25, "#FF2AEF"], [0.5, "#FFB114"],
+                          [0.75, "#FFFF00"], [1.0, "#39FF14"]]
     
     scores = [r['composite_score'] for r in segment_results]
     avg_score = float(np.mean(scores)) if len(scores) > 0 else 0.0
@@ -120,101 +128,206 @@ def show_segment_analysis(segment_results):
         st.metric("Consistency (Std)", f"{std_score:.1f}")
     
     st.markdown("---")
-    st.subheader("📈 Performance Visualization")
+    st.subheader("📈 Segment Scores Over Time")
     
-    bar = go.Bar(x=seg_labels, y=scores, marker=dict(color=bar_color, line=dict(width=1, color="#888")),
-                 customdata=hover_texts, hovertemplate="%{customdata}<extra></extra>", hoverinfo="none", name="Segment Score")
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        x=seg_labels, y=scores, marker_color=bar_color, text=[f"{s:.1f}" for s in scores],
+        textposition='outside', hovertext=hover_texts, hoverinfo='text', name='Segment Score'
+    ))
     
-    shapes = [
-        dict(type="line", xref="x", yref="y", x0=-1, x1=len(seg_labels), y0=avg_score, y1=avg_score,
-             line=dict(width=2, dash="dash", color=avg_line_color)),
-        dict(type="line", xref="x", yref="y", x0=-1, x1=len(seg_labels), y0=80, y1=80,
-             line=dict(width=1, dash="dot", color=exc_line_color)),
-        dict(type="line", xref="x", yref="y", x0=-1, x1=len(seg_labels), y0=60, y1=60,
-             line=dict(width=1, dash="dot", color=fair_line_color)),
-        dict(type="line", xref="x", yref="y", x0=-1, x1=len(seg_labels), y0=40, y1=40,
-             line=dict(width=1, dash="dot", color=poor_line_color)),
-    ]
+    fig_bar.add_trace(go.Scatter(
+        x=seg_labels, y=[avg_score]*len(seg_labels), mode='lines',
+        name=f'Average ({avg_score:.1f})', line=dict(color=avg_line_color, width=2, dash='dash')
+    ))
     
-    bar_layout = go.Layout(title="Per-Segment Performance Scores", xaxis=dict(title="Segment Number"),
-                           yaxis=dict(title="Score", range=[0, 105]), shapes=shapes, hovermode="x unified", height=420,
-                           template="plotly_dark", font=dict(color=text_color), plot_bgcolor=bg_color, paper_bgcolor=bg_color)
+    fig_bar.add_trace(go.Scatter(
+        x=seg_labels, y=[80]*len(seg_labels), mode='lines',
+        name='Excellent (80)', line=dict(color=exc_line_color, width=1, dash='dot')
+    ))
     
-    bar_fig = go.Figure(data=[bar], layout=bar_layout)
-    if seg_labels:
-        bar_fig.add_annotation(x=seg_labels[-1], y=avg_score, text=f"Avg: {avg_score:.1f}", showarrow=False,
-                               yanchor="middle", xanchor="left", font=dict(color=avg_line_color))
-        bar_fig.add_annotation(x=seg_labels[-1], y=80, text="Excellent Threshold", showarrow=False,
-                               yanchor="middle", xanchor="left", font=dict(color=exc_line_color))
-        bar_fig.add_annotation(x=seg_labels[-1], y=60, text="Fair Threshold", showarrow=False,
-                               yanchor="middle", xanchor="left", font=dict(color=fair_line_color))
-        bar_fig.add_annotation(x=seg_labels[-1], y=40, text="Poor Threshold", showarrow=False,
-                               yanchor="middle", xanchor="left", font=dict(color=poor_line_color))
+    fig_bar.add_trace(go.Scatter(
+        x=seg_labels, y=[50]*len(seg_labels), mode='lines',
+        name='Fair (50)', line=dict(color=fair_line_color, width=1, dash='dot')
+    ))
     
-    st.plotly_chart(bar_fig, use_container_width=True)
+    fig_bar.add_trace(go.Scatter(
+        x=seg_labels, y=[35]*len(seg_labels), mode='lines',
+        name='Poor (35)', line=dict(color=poor_line_color, width=1, dash='dot')
+    ))
     
-    metrics_data = np.array([
-        [r.get('model_confidence', 0) for r in segment_results],
+    fig_bar.update_layout(
+        title="Composite Score by Segment",
+        xaxis_title="Segment", yaxis_title="Score (0-100)",
+        yaxis=dict(range=[0, 105]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
+        margin=dict(l=40, r=20, t=80, b=40),
+        template="plotly_dark", height=450,
+        plot_bgcolor=bg_color, paper_bgcolor=bg_color, font=dict(color=text_color)
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+    
+    st.markdown("---")
+    st.subheader("🔥 Heatmap: Metric Performance")
+    
+    metrics_data = [
         [r.get('mfcc_similarity', 0) for r in segment_results],
         [r.get('pitch_corr', 0) for r in segment_results],
-        [r.get('energy_corr', 0) for r in segment_results]
-    ])
-    metric_labels = ['Model\nConfidence', 'MFCC\nSimilarity', 'Pitch\nCorrelation', 'Energy\nCorrelation']
+        [r.get('energy_corr', 0) for r in segment_results],
+        [100 - min(r.get('dtw_distance', 0), 100) for r in segment_results]
+    ]
+    metric_names = ['MFCC Sim', 'Pitch Corr', 'Energy Corr', 'DTW (inverted)']
     
-    heat = go.Heatmap(z=metrics_data, x=list(range(len(seg_labels))), y=metric_labels, colorscale=heatmap_colorscale,
-                      zmin=0, zmax=100, colorbar=dict(title="Score (%)"), hovertemplate="%{y}<br>Segment %{x}<br>Value: %{z:.0f}<extra></extra>")
+    hover_matrix = []
+    for i, metric_name in enumerate(metric_names):
+        row = []
+        for j, seg_num in enumerate(segment_nums):
+            val = metrics_data[i][j]
+            row.append(f"<b>{metric_name}</b><br>Segment {seg_num}<br>Value: {val:.1f}")
+        hover_matrix.append(row)
     
-    heat_layout = go.Layout(title="Detailed Metrics Heatmap", xaxis=dict(title="Segment Number", tickmode="array",
-                                                                          tickvals=list(range(len(seg_labels))), ticktext=seg_labels),
-                            yaxis=dict(autorange="reversed"), height=350, template="plotly_dark")
+    fig_heatmap = go.Figure(data=go.Heatmap(
+        z=metrics_data, x=seg_labels, y=metric_names,
+        colorscale=heatmap_colorscale, colorbar=dict(title="Score"),
+        hovertext=hover_matrix, hoverinfo='text'
+    ))
     
-    heat_fig = go.Figure(data=[heat], layout=heat_layout)
-    annotations = []
-    for i, metric in enumerate(metric_labels):
-        for j, seg in enumerate(seg_labels):
-            val = metrics_data[i, j]
-            if val > 40:
-                text_color = "#0E0E10" 
-            else:
-                text_color = "#F8F8FF" 
-            annotations.append(dict(x=j, y=metric, text=f"{val:.0f}", showarrow=False, xanchor="center",
-                                    yanchor="middle", font=dict(size=10, color=text_color)))
-    heat_fig.update_layout(annotations=annotations)
-    st.plotly_chart(heat_fig, use_container_width=True)
+    fig_heatmap.update_layout(
+        title="Heatmap: Metrics Across Segments",
+        xaxis_title="Segment", yaxis_title="Metric",
+        margin=dict(l=80, r=20, t=60, b=40),
+        template="plotly_dark", height=350,
+        plot_bgcolor=bg_color, paper_bgcolor=bg_color, font=dict(color=text_color)
+    )
+    st.plotly_chart(fig_heatmap, use_container_width=True)
+    
     st.markdown("---")
+    st.subheader("🧩 Detailed Segment Breakdown")
     
-    st.subheader("⚠️ 5 Worst Performing Segments")
-    worst_segments = sorted(segment_results, key=lambda x: x['composite_score'])[:5]
-    for result_s in worst_segments:
-        st.markdown(f"**SEGMENT {result_s['segment_num']} ({result_s.get('time_range','N/A')}):**")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown(f"**Score:** {result_s['composite_score']:.1f}/100")
-            st.markdown(f"**Rating:** {result_s['rating']}")
-        with col2:
-            st.markdown(f"**Weaknesses:** {', '.join(result_s['weaknesses'])}")
-        st.markdown(f"Model Conf: {result_s.get('model_confidence',0):.1f}% | MFCC: {result_s.get('mfcc_similarity',0):.1f}% | "
-                    f"Pitch: {result_s.get('pitch_corr',0):.1f}% | Energy: {result_s.get('energy_corr',0):.1f}%")
-        st.markdown("---")
+    for seg in segment_results:
+        with st.expander(f"Segment {seg['segment_num']} - {seg['rating']} ({seg['composite_score']:.1f}/100)"):
+            st.markdown(f"**Time Range**: {seg.get('time_range', 'N/A')}")
+            st.markdown(f"**Weaknesses**: {', '.join(seg.get('weaknesses', ['None']))}")
+            
+            seg_col1, seg_col2, seg_col3 = st.columns(3)
+            with seg_col1:
+                st.metric("Model Confidence", f"{seg.get('model_confidence', 0):.1f}%")
+                st.metric("MFCC Similarity", f"{seg.get('mfcc_similarity', 0):.1f}%")
+            with seg_col2:
+                st.metric("Pitch Correlation", f"{seg.get('pitch_corr', 0):.1f}")
+                st.metric("Energy Correlation", f"{seg.get('energy_corr', 0):.1f}")
+            with seg_col3:
+                st.metric("DTW Distance", f"{seg.get('dtw_distance', 0):.1f}")
+                st.metric("Tempo Diff", f"{seg.get('tempo_diff', 0):.1f} BPM")
+
+def show_gemini_feedback(gemini_result, comp_feats=None):
+    """Display AI-generated coaching feedback from Gemini."""
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.subheader("🤖 AI Vocal Coach Feedback")
     
-    all_weaknesses = []
-    for r in segment_results:
-        if r.get('weaknesses') and r['weaknesses'] != ["None - well done!"]:
-            all_weaknesses.extend(r['weaknesses'])
+    if gemini_result.get('status') == 'error':
+        st.error(f"❌ Error generating AI feedback: {gemini_result.get('error', 'Unknown error')}")
+        st.markdown('</div>', unsafe_allow_html=True)
+        return
     
-    if all_weaknesses:
-        weakness_counts = Counter(all_weaknesses)
-        st.subheader("🎯 Most Common Issues")
-        for weakness, count in weakness_counts.most_common():
-            st.markdown(f"- **{weakness}**: {count} segment(s)")
+    # Check if we have parsed feedback or raw response
+    if 'feedback' in gemini_result:
+        feedback = gemini_result['feedback']
+        
+        # Display strengths
+        if 'strengths' in feedback:
+            st.markdown("### ✨ Your Strengths")
+            st.success(feedback['strengths'])
+        
+        # Display metrics with feedback
+        if 'metrics' in feedback:
+            st.markdown("### 📊 Detailed Metric Analysis")
+            
+            metrics = feedback['metrics']
+            
+            metric_items = list(metrics.items())
+            half = (len(metric_items) + 1) // 2
+            
+            metrics_map = {
+                "mfcc_similarity": ("mfcc_cosine", "{:.2%}"),
+                "chroma_similarity": ("chroma_cosine", "{:.2%}"),
+                "pitch_correlation": ("pitch_corr", "{:.2f}"),
+                "energy_correlation": ("energy_corr", "{:.2f}"),
+                "dtw_distance": ("dtw_mean", "{:.1f}"),
+                "tempo_diff": ("tempo_diff", "{:.1f} BPM"),
+            }
+
+            col1, col2 = st.columns(2)
+            # First half
+            with col1:
+                for metric_key, metric_data in metric_items[:half]:
+                    with st.container():
+                        comp_key, fmt = metrics_map.get(metric_key, (None, None))
+                        if comp_key and comp_feats and comp_key in comp_feats:
+                            actual_value = fmt.format(comp_feats[comp_key])
+                        else:
+                            actual_value = "N/A"
+                        st.markdown(f"**{metric_data.get('label', metric_key)}**: {actual_value}")
+                        st.caption(metric_data.get('meaning', ''))
+                        if metric_data.get('feedback'):
+                            st.info(metric_data['feedback'])
+                        st.markdown("---")
+
+            # Second half
+            with col2:
+                for metric_key, metric_data in metric_items[half:]:
+                    with st.container():
+                        comp_key, fmt = metrics_map.get(metric_key, (None, None))
+                        if comp_key and comp_feats and comp_key in comp_feats:
+                            actual_value = fmt.format(comp_feats[comp_key])
+                        else:
+                            actual_value = "N/A"
+                        st.markdown(f"**{metric_data.get('label', metric_key)}**: {actual_value}")
+                        st.caption(metric_data.get('meaning', ''))
+                        if metric_data.get('feedback'):
+                            st.info(metric_data['feedback'])
+                        st.markdown("---")
+
+        
+        # Display next steps
+        if 'next_steps' in feedback:
+            st.markdown("### 🎯 Practice Recommendations")
+            st.warning(feedback['next_steps'])
+    
+    elif 'raw_response' in gemini_result:
+        # Fallback: display raw response if JSON parsing failed
+        st.warning("⚠️ AI response received but couldn't be fully parsed. Here's the raw feedback:")
+        st.text(gemini_result['raw_response'])
+        if 'parse_error' in gemini_result:
+            st.caption(f"Parse error: {gemini_result['parse_error']}")
+    
     else:
-        st.success("✅ No significant issues detected!")
+        st.info("No feedback data available")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ========================================
-# STREAMLIT APP
+# MODEL LOADING
 # ========================================
-st.set_page_config(page_title="VocaLift - AI Vocal Coach", page_icon="🎤", layout="wide")
-st.markdown("""
+
+@st.cache_resource
+def load_vocalift_model():
+    """Load the trained VocaLift model (cached)."""
+    try:
+        model = load_model(MODEL_PATH, compile=False)
+        return model
+    except Exception as e:
+        st.error(f"Failed to load model: {e}")
+        return None
+
+# ========================================
+# MAIN APP
+# ========================================
+
+def main():
+    st.set_page_config(page_title="VocaLift - AI Vocal Coach", page_icon="🎤", layout="wide")
+    
+    st.markdown("""
 <style>
 /* Neon Glow Header Styles */
 
@@ -238,8 +351,8 @@ h2.pitch {
 
 </style>
 """, unsafe_allow_html=True)
-
-st.markdown("""
+    
+    st.markdown("""
 <div style="text-align:center; width:100%; display:flex; flex-direction:column; align-items:center;">
   <h1 style="
       margin: 0;
@@ -252,178 +365,301 @@ st.markdown("""
       -webkit-text-fill-color: transparent;
       text-shadow: 0 0 10px rgba(57,255,20,0.6);
       ">
-    🎵 VocaLift - Your AI Vocal Coach 🎵
-  </h1>
+    🎵 VocaLift 🎵</h1>
 
   <p style="
-      margin: 12px 0 0 0;
+      margin: 12px auto 0 auto;
       padding: 0;
       font-size: 16px;
       line-height: 1.4;
       max-width: 900px;
       color: #F8F8FF;
+      text-align: center;
       ">
-    Upload your singing audio and a coach/reference audio to get detailed AI-powered feedback!
+    Your AI Vocal Coach, Anytime, Anywhere
   </p>
 </div>
 """, unsafe_allow_html=True)
-
-
-
-with st.sidebar:
-    st.header("Model Configuration")
-    if os.path.exists(MODEL_PATH):
-        st.success("✅ Model File Found")
-        model_loaded = True
-    else:
-        st.error(f"❌ Model file not found")
-        model_loaded = False
-    if st.session_state.full_song_result is not None or st.session_state.segment_results is not None or st.session_state.pitch_contour_fig is not None:
-        st.header("Results:")
-
-    if st.session_state.full_song_result is not None:
-        st.sidebar.markdown("""
-    <div style='margin-bottom:8px;background:#0F2E0F;border-radius:8px;padding:10px 16px;'>
-        <a href="#full-analysis" style='text-decoration:none;color:#39FF14;font-weight:bold;display:flex;align-items:center;'>
-            <span style="font-size:1.2em;margin-right:0.5em;">🎵</span>
-            Full Song Analysis
-        </a>
-    </div>""", unsafe_allow_html=True)
-
-    if st.session_state.segment_results is not None:
-        st.sidebar.markdown("""
-    <div style='margin-bottom:8px;background:#3A0036;border-radius:8px;padding:10px 16px;'>
-        <a href="#segment-analysis" style='text-decoration:none;color:#FF2AEF;font-weight:bold;display:flex;align-items:center;'>
-            <span style="font-size:1.2em;margin-right:0.5em;">🔬</span>
-            Segment Analysis
-        </a>
-    </div>""", unsafe_allow_html=True)
-
-    if st.session_state.pitch_contour_fig is not None:
-        st.sidebar.markdown("""
-    <div style='margin-bottom:8px;background:#3A3000;border-radius:8px;padding:10px 16px;'>
-        <a href="#pitch-contour" style='text-decoration:none;color:#FFD700;font-weight:bold;display:flex;align-items:center;'>
-            <span style="font-size:1.2em;margin-right:0.5em;">🎚️</span>
-            Pitch Contour
-        </a>
-    </div>""", unsafe_allow_html=True)
-
-
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("📁 Coach Audio")
-    coach_file = st.file_uploader("Upload coach audio", type=['mp3', 'wav'], key="coach")
-    if coach_file:
-        st.audio(coach_file)
-        st.success(f"✅ Loaded: {coach_file.name}")
-
-with col2:
-    st.subheader("🎙️ Your Audio")
-    user_file = st.file_uploader("Upload your singing", type=['mp3', 'wav'], key="user")
-    if user_file:
-        st.audio(user_file)
-        st.success(f"✅ Loaded: {user_file.name}")
-
-st.markdown("---")
-
-if coach_file and user_file and model_loaded:
-    disable_buttons = st.session_state.is_processing
     
-    col1, col2, col3 = st.columns(3)
+    with st.sidebar:
+        st.header("Model Configuration")
+        model = load_vocalift_model()
+
+        if model is None:
+            st.error("❌ Model could not be loaded. Please check the model path.")
+            return
+        
+        st.success("✅ VocaLift model loaded successfully!")
+
+        if st.session_state.full_song_result is not None or st.session_state.segment_results is not None or st.session_state.pitch_contour_fig is not None:
+            st.header("Results:")
+
+        if st.session_state.full_song_result is not None:
+            st.sidebar.markdown("""
+        <div style='margin-bottom:8px;background:#0F2E0F;border-radius:8px;padding:10px 16px;'>
+            <a href="#full-analysis" style='text-decoration:none;color:#39FF14;font-weight:bold;display:flex;align-items:center;'>
+                <span style="font-size:1.2em;margin-right:0.5em;">🎵</span>
+                Full Song Analysis
+            </a>
+        </div>""", unsafe_allow_html=True)
+
+        if st.session_state.segment_results is not None:
+            st.sidebar.markdown("""
+        <div style='margin-bottom:8px;background:#3A0036;border-radius:8px;padding:10px 16px;'>
+            <a href="#segment-analysis" style='text-decoration:none;color:#FF2AEF;font-weight:bold;display:flex;align-items:center;'>
+                <span style="font-size:1.2em;margin-right:0.5em;">🔬</span>
+                Segment Analysis
+            </a>
+        </div>""", unsafe_allow_html=True)
+
+        if st.session_state.pitch_contour_fig is not None:
+            st.sidebar.markdown("""
+        <div style='margin-bottom:8px;background:#3A3000;border-radius:8px;padding:10px 16px;'>
+            <a href="#pitch-contour" style='text-decoration:none;color:#FFD700;font-weight:bold;display:flex;align-items:center;'>
+                <span style="font-size:1.2em;margin-right:0.5em;">🎚️</span>
+                Pitch Contour
+            </a>
+        </div>""", unsafe_allow_html=True)
+            
+        if (
+            st.session_state.full_song_result is not None or
+            st.session_state.segment_results is not None or
+            st.session_state.pitch_contour_fig is not None or
+            st.session_state.gemini_feedback is not None
+        ):
+            st.markdown(
+                """
+                <div style='
+                    position: fixed;
+                    left: 0;
+                    bottom: 0;
+                    width: 21rem;  /* Streamlit's sidebar default width, change if you customize sidebar width */
+                    z-index: 9999;
+                    background: rgba(20,24,20,0.97);
+                    border-top: 2px solid #39FF14;
+                    padding: 16px 16px 24px 16px;
+                    text-align: center;
+                    box-shadow: 0 -2px 12px #202023;
+                '>
+                    <span style='font-weight: bold; color: #39FF14; font-size: 1rem;'>
+                        Need a fresh start?
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            # The button visually appears on top of Streamlit, but logically is at the bottom
+            if st.button(
+                "Clear Results",
+                help="Remove all analysis results and start fresh.",
+                use_container_width=True,
+                key="clear_results_btn"
+            ):
+                st.session_state.full_song_result = None
+                st.session_state.segment_results = None
+                st.session_state.pitch_contour_fig = None
+                st.session_state.gemini_feedback = None
+                st.session_state.analysis_audio_files = {}
+                st.session_state.analysis_to_run = None
+                st.rerun()
+    
+    
+    # File upload section
+    st.markdown("---")
+    st.header("📁 Upload Audio Files")
+    
+    col1, col2 = st.columns(2)
     with col1:
-        analyze_full = st.button("🎵 Get Full Song Analysis", type="secondary", use_container_width=True, disabled=disable_buttons)
+        coach_file = st.file_uploader(
+            "🎵 Coach/Reference Audio",
+            type=['mp3', 'wav', 'm4a', 'flac', 'aiff', 'ogg'],
+            help="Upload the reference/coach singing audio"
+        )
     with col2:
-        analyze_segments_button = st.button("🔬 Get Segment Analysis", type="secondary", use_container_width=True, disabled=disable_buttons)
-    with col3:
-        analyze_pitch = st.button("🎚️ Get Pitch Contour", type="secondary", use_container_width=True, disabled=disable_buttons)
+        user_file = st.file_uploader(
+            "🎤 Your Singing Audio",
+            type=['mp3', 'wav', 'm4a', 'flac', 'aiff', 'ogg'],
+            help="Upload your singing audio to analyze"
+        )
     
-    if (analyze_full or analyze_segments_button or analyze_pitch) and not st.session_state.is_processing:
-        st.session_state.is_processing = True
-        st.session_state.analysis_to_run = "full" if analyze_full else "segments" if analyze_segments_button else "pitch"
-        st.rerun()
-    
-    if st.session_state.is_processing:
-        st.info("Please wait, analysis is running...")
-        if st.session_state.analysis_to_run == "pitch":
-            with st.spinner("Generating Pitch Contours..."):
-                try:
-                    coach_temp, user_temp = save_uploaded_files(coach_file, user_file)
-                    pitch_fig = make_pitch_contour_figure(coach_temp, user_temp, sr=SR, hop_length=512)
-                    st.session_state.pitch_contour_fig = pitch_fig
-                except Exception as e:
-                    st.session_state.pitch_contour_fig = None
-                    st.warning(f"Could not generate pitch contour plot: {e}")
+    if coach_file and user_file:
+        st.success("✅ Both audio files uploaded!")
         
-        elif st.session_state.analysis_to_run == "full":
-            with st.spinner("Processing full song..."):
-                try:
-                    coach_temp, user_temp = save_uploaded_files(coach_file, user_file)
-                    model = load_model(MODEL_PATH, compile=False)
-                    result = generate_feedback(coach_temp, user_temp, model)
+        # Audio playback
+        st.markdown("---")
+        st.header("🔊 Audio Preview")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Coach Audio")
+            st.audio(coach_file, format='audio/wav')
+        with col2:
+            st.subheader("Your Audio")
+            st.audio(user_file, format='audio/wav')
+        
+        st.markdown("---")
+        st.header("🔬 Analysis Options")
+        
+        analysis_type = st.radio(
+            "Choose Analysis Type:",
+            ["Full Song Analysis", "Segment-by-Segment Analysis", "Pitch Contour Visualization", "Complete Analysis (All)"],
+            help="Select what type of analysis you want to perform"
+        )
+        
+        analyze_button = st.button("Run Analysis", type="primary", use_container_width=True)
+        
+        if analyze_button:
+            st.session_state.is_processing = True
+            st.session_state.analysis_audio_files = {"coach": coach_file, "user": user_file}
+            
+            if analysis_type == "Full Song Analysis":
+                st.session_state.analysis_to_run = "full"
+            elif analysis_type == "Segment-by-Segment Analysis":
+                st.session_state.analysis_to_run = "segments"
+            elif analysis_type == "Pitch Contour Visualization":
+                st.session_state.analysis_to_run = "pitch"
+            else:
+                st.session_state.analysis_to_run = "complete"
+            
+            st.rerun()
+    
+    # Process analysis if triggered
+    if st.session_state.is_processing and st.session_state.analysis_to_run:
+        coach_file = st.session_state.analysis_audio_files.get("coach")
+        user_file = st.session_state.analysis_audio_files.get("user")
+        
+        if not coach_file or not user_file:
+            st.error("Audio files not found in session state")
+            st.session_state.is_processing = False
+            return
+        
+        try:
+            with st.spinner("🔄 Processing audio files..."):
+                coach_path, user_path = save_uploaded_files(coach_file, user_file)
+            
+            if st.session_state.analysis_to_run == "full":
+                with st.spinner("🧠 Running full song analysis..."):
+                    result = generate_feedback(coach_path, user_path, model, sr=SR)
                     st.session_state.full_song_result = result
-                    st.session_state.analysis_audio_files = {'coach_temp': coach_temp, 'user_temp': user_temp}
-                    st.success("✅ Analysis complete!")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-        
-        elif st.session_state.analysis_to_run == "segments":
-            with st.spinner("Processing segments..."):
+                    
+                    # NEW: Generate Gemini feedback
+                    with st.spinner("🤖 Generating AI coach feedback..."):
+                        gemini_result = get_gemini_feedback(result)
+                        st.session_state.gemini_feedback = gemini_result
+                
+                st.success("✅ Full song analysis complete!")
+            
+            elif st.session_state.analysis_to_run == "segments":
                 progress_bar = st.progress(0)
                 status_text = st.empty()
+                
                 def progress_callback(current, total):
-                    status_text.text(f"Processing segment {current}/{total}...")
-                    progress_bar.progress(current / total)
-                try:
-                    coach_temp, user_temp = save_uploaded_files(coach_file, user_file)
-                    model = load_model(MODEL_PATH, compile=False)
-                    segment_results = analyze_segments(coach_temp, user_temp, model, progress_callback=progress_callback)
+                    progress = current / total
+                    progress_bar.progress(progress)
+                    status_text.text(f"Analyzing segment {current}/{total}...")
+                
+                with st.spinner("🧠 Running segment analysis..."):
+                    segment_results = analyze_segments(
+                        coach_path, user_path, model, 
+                        progress_callback=progress_callback, sr=SR
+                    )
                     st.session_state.segment_results = segment_results
-                    st.session_state.analysis_audio_files = {'coach_temp': coach_temp, 'user_temp': user_temp}
-                    st.success("✅ Analysis complete!")
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-                finally:
-                    status_text.empty()
-                    progress_bar.empty()
-        st.session_state.is_processing = False
-        st.rerun()
+                
+                progress_bar.empty()
+                status_text.empty()
+                st.success("✅ Segment analysis complete!")
+            
+            elif st.session_state.analysis_to_run == "pitch":
+                with st.spinner("🎵 Generating pitch contour visualization..."):
+                    fig = make_pitch_contour_figure(coach_path, user_path, sr=SR)
+                    st.session_state.pitch_contour_fig = fig
+                
+                st.success("✅ Pitch contour visualization complete!")
+            
+            elif st.session_state.analysis_to_run == "complete":
+                with st.spinner("🧠 Running full song analysis..."):
+                    result = generate_feedback(coach_path, user_path, model, sr=SR)
+                    st.session_state.full_song_result = result
+                    
+                    with st.spinner("🤖 Generating AI coach feedback..."):
+                        gemini_result = get_gemini_feedback(result)
+                        st.session_state.gemini_feedback = gemini_result
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                def progress_callback(current, total):
+                    progress = current / total
+                    progress_bar.progress(progress)
+                    status_text.text(f"Analyzing segment {current}/{total}...")
+                
+                with st.spinner("🧠 Running segment analysis..."):
+                    segment_results = analyze_segments(
+                        coach_path, user_path, model,
+                        progress_callback=progress_callback, sr=SR
+                    )
+                    st.session_state.segment_results = segment_results
+                
+                progress_bar.empty()
+                status_text.empty()
+                
+                with st.spinner("🎵 Generating pitch contour..."):
+                    fig = make_pitch_contour_figure(coach_path, user_path, sr=SR)
+                    st.session_state.pitch_contour_fig = fig
+                
+                st.success("✅ Complete analysis finished!")
+            
+            # Clean up temp files
+            try:
+                if os.path.exists(coach_path):
+                    os.remove(coach_path)
+                if os.path.exists(user_path):
+                    os.remove(user_path)
+            except Exception as e:
+                st.warning(f"Could not remove temp files: {e}")
+            
+            st.session_state.is_processing = False
+            st.session_state.analysis_to_run = None
+            st.rerun()
+        
+        except Exception as e:
+            st.error(f"❌ Analysis failed: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+            st.session_state.is_processing = False
+            st.session_state.analysis_to_run = None
+    
+    # Display results
     st.markdown("---")
     
-    if st.session_state.full_song_result is not None:
+    if st.session_state.full_song_result:
         st.markdown('<a id="full-analysis"></a>', unsafe_allow_html=True)
+        st.markdown('<h2 class="full-song">📊 Full Song Analysis Results</h2>', unsafe_allow_html=True)
         show_full_song_analysis(st.session_state.full_song_result)
-        st.markdown("---")
+        
+        if st.session_state.gemini_feedback:
+            st.markdown("---")
+            show_gemini_feedback(st.session_state.gemini_feedback, st.session_state.full_song_result["comp_feats"])
     
-    if st.session_state.segment_results is not None:
+    if st.session_state.segment_results:
+        st.markdown("---")
         st.markdown('<a id="segment-analysis"></a>', unsafe_allow_html=True)
         st.markdown('<h2 class="segment">🔬 Segment Analysis Results</h2>', unsafe_allow_html=True)
         show_segment_analysis(st.session_state.segment_results)
-        st.markdown("---")
     
-    if st.session_state.pitch_contour_fig is not None:
+    if st.session_state.pitch_contour_fig:
+        st.markdown("---")
         st.markdown('<a id="pitch-contour"></a>', unsafe_allow_html=True)
         st.markdown('<h2 class="pitch">🎚️ Pitch Contour Comparison</h2>', unsafe_allow_html=True)
         st.plotly_chart(st.session_state.pitch_contour_fig, use_container_width=True)
     
-    if st.session_state.full_song_result is not None or st.session_state.segment_results is not None or st.session_state.pitch_contour_fig is not None:
-        if st.button("🧹 Clear All Results"):
-            st.session_state.full_song_result = None
-            st.session_state.segment_results = None
-            st.session_state.pitch_contour_fig = None
-            st.session_state.analysis_to_run = None
-            for key in ['coach_temp', 'user_temp']:
-                if key in st.session_state.analysis_audio_files:
-                    try:
-                        os.remove(st.session_state.analysis_audio_files[key])
-                    except:
-                        pass
-            st.session_state.analysis_audio_files = {}
-            st.rerun()
+    # Footer
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; color: #777;'>
+        <p><strong>VocaLift</strong> - Your AI Vocal Coach | Built with Streamlit & TensorFlow</p>
+        <p>Powered by advanced audio analysis and machine learning</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-elif not model_loaded:
-    st.warning("⚠️ Model file not found!")
-else:
-    st.info("👆 Upload both audio files to start")
-
-st.markdown("---")
-st.markdown("<div style='text-align: center;'><p><strong>VocaLift</strong> - Your AI Vocal Coach | Built with Streamlit & TensorFlow</p></div>", unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()
