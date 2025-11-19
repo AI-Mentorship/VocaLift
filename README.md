@@ -1,6 +1,6 @@
 # VocaLift - AI Vocal Coach
 
-**VocaLift** is a Streamlit-powered AI vocal coach that delivers actionable feedback and rich visualizations based on advanced audio analysis and machine learning. By comparing your singing with a reference (coach) audio, VocaLift helps users improve their pitch, timing, dynamics, and overall vocal quality — anytime, anywhere.
+**VocaLift** is a Streamlit-powered AI vocal coach that delivers actionable feedback and rich visualizations based on advanced audio analysis and machine learning. By comparing your singing with a reference (coach) audio, VocaLift helps users improve their pitch, timing, dynamics, and overall vocal quality - anytime, anywhere.
 
 ***
 
